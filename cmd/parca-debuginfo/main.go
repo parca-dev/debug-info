@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 
@@ -151,7 +150,7 @@ func run() error {
 				}
 				f, err := os.Open(path)
 				if err != nil {
-					level.Error(logger).Log("failed to open source file", "err", err)
+					level.Error(logger).Log("msg", "failed to open source file", "err", err)
 					continue
 				}
 				f.Close()
@@ -232,7 +231,7 @@ func grpcConn(reg prometheus.Registerer, flags flags) (*grpc.ClientConn, error) 
 	}
 
 	if flags.Upload.BearerTokenFile != "" {
-		b, err := ioutil.ReadFile(flags.Upload.BearerTokenFile)
+		b, err := os.ReadFile(flags.Upload.BearerTokenFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read bearer token from file: %w", err)
 		}
