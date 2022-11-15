@@ -30,6 +30,7 @@ builds:
 archives:
   - replacements:
       linux: Linux
+      darwin: Darwin
       amd64: x86_64
     format_overrides:
       - goos: windows
