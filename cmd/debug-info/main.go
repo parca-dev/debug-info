@@ -108,15 +108,9 @@ func run() error {
 			for _, path := range flags.Upload.Paths {
 				buildID, err := buildid.BuildID(path)
 				if err != nil {
-					level.Error(logger).Log("failed to extract elf build ID", "err", err)
+					level.Error(logger).Log("msg", "failed to extract elf build ID", "err", err)
 					continue
 				}
-				f, err := os.Open(path)
-				if err != nil {
-					level.Error(logger).Log("failed to open source file", "err", err)
-					continue
-				}
-				f.Close()
 
 				buf := &flexbuf.Buffer{}
 				srcDst[path] = buf
@@ -131,11 +125,9 @@ func run() error {
 			if err := die.ExtractAll(ctx, srcDst); err != nil {
 				return fmt.Errorf("failed to extract debug information: %w", err)
 			}
-			defer func() {
-				for _, buf := range buffers {
-					buf.SeekStart()
-				}
-			}()
+			for _, buf := range buffers {
+				buf.SeekStart()
+			}
 
 			return diu.UploadAll(ctx, srcReader)
 		}, func(error) {
