@@ -1,8 +1,8 @@
-![Build](https://github.com/parca-dev/debug-info/actions/workflows/build.yml/badge.svg)
-![Container](https://github.com/parca-dev/debug-info/actions/workflows/container.yml/badge.svg)
+![Build](https://github.com/parca-dev/parca-debuginfo/actions/workflows/build.yml/badge.svg)
+![Container](https://github.com/parca-dev/parca-debuginfo/actions/workflows/container.yml/badge.svg)
 [![Apache 2 License](https://img.shields.io/badge/license-Apache%202-blue.svg)](LICENSE)
 
-# debug-info
+# parca-debuginfo
 A command line utility to handle tasks regarding debug information (extraction, upload and debugging)
 
 ## Configuration
@@ -11,7 +11,7 @@ Flags:
 
 [embedmd]:# (dist/help.txt)
 ```txt
-Usage: debug-info <command>
+Usage: parca-debuginfo <command>
 
 Flags:
   -h, --help                Show context-sensitive help.
@@ -27,5 +27,5 @@ Commands:
   buildid <path>
     Extract buildid.
 
-Run "debug-info <command> --help" for more information on a command.
+Run "parca-debuginfo <command> --help" for more information on a command.
 ```

@@ -1,6 +1,6 @@
-module github.com/parca-dev/debug-info
+module github.com/parca-dev/parca-debuginfo
 
-go 1.18
+go 1.19
 
 require (
 	github.com/alecthomas/kong v0.7.0

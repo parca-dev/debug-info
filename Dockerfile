@@ -10,14 +10,14 @@ COPY goreleaser/dist dist
 
 # NOTICE: See goreleaser.yml for the build paths.
 RUN if [ "${TARGETARCH}" == 'amd64' ]; then \
-        cp "dist/debug-info_${TARGETOS}_${TARGETARCH}_${TARGETVARIANT:-v1}/debug-info" . ; \
+        cp "dist/parca-debuginfo_${TARGETOS}_${TARGETARCH}_${TARGETVARIANT:-v1}/parca-debuginfo" . ; \
     elif [ "${TARGETARCH}" == 'arm' ]; then \
-        cp "dist/debug-info_${TARGETOS}_${TARGETARCH}_${TARGETVARIANT##v}/debug-info" . ; \
+        cp "dist/parca-debuginfo_${TARGETOS}_${TARGETARCH}_${TARGETVARIANT##v}/parca-debuginfo" . ; \
     else \
-        cp "dist/debug-info_${TARGETOS}_${TARGETARCH}/debug-info" . ; \
+        cp "dist/parca-debuginfo_${TARGETOS}_${TARGETARCH}/parca-debuginfo" . ; \
     fi
-RUN chmod +x debug-info
+RUN chmod +x parca-debuginfo
 
 FROM --platform="${TARGETPLATFORM:-linux/amd64}" gcr.io/distroless/static@sha256:21d3f84a4f37c36199fd07ad5544dcafecc17776e3f3628baf9a57c8c0181b3f
-COPY --chown=0:0 --from=builder /app/debug-info /bin/debug-info
-CMD ["/bin/debug-info"]
+COPY --chown=0:0 --from=builder /app/parca-debuginfo /bin/parca-debuginfo
+CMD ["/bin/parca-debuginfo"]

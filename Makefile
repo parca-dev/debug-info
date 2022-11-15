@@ -27,9 +27,9 @@ VERSION ?= $(if $(RELEASE_TAG),$(RELEASE_TAG),$(shell $(CMD_GIT) describe --tags
 # inputs and outputs:
 OUT_DIR ?= dist
 GO_SRC := $(shell find . -type f -name '*.go')
-OUT_BIN := $(OUT_DIR)/debug-info
-OUT_DOCKER ?= ghcr.io/parca-dev/debug-info
-OUT_DOCKER_DEV ?= parca-dev/debug-info
+OUT_BIN := $(OUT_DIR)/parca-debuginfo
+OUT_DOCKER ?= ghcr.io/parca-dev/parca-debuginfo
+OUT_DOCKER_DEV ?= parca-dev/parca-debuginfo
 
 .PHONY: all
 all: build
@@ -45,7 +45,7 @@ GO_BUILD_FLAGS := -tags osusergo,netgo -mod=readonly -trimpath -v
 
 $(OUT_BIN): $(filter-out *_test.go,$(GO_SRC)) go/deps | $(OUT_DIR)
 	find dist -exec touch -t 202101010000.00 {} +
-	$(GO) build -trimpath -v -o $(OUT_BIN) ./cmd/debug-info
+	$(GO) build -trimpath -v -o $(OUT_BIN) ./cmd/parca-debuginfo
 
 .PHONY: go/deps
 go/deps:

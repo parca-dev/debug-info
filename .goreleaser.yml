@@ -1,15 +1,15 @@
 # NOTICE: This file is written with the assumption that it will be used in parca-dev/cross-builder.
 # - There are paths in this file that are specific to parca-dev/cross-builder and Github Actions.
 # - Unfortunately, Goreleaser does not support templating environment variables per build config.
-project_name: debug-info
+project_name: parca-debuginfo
 dist: ./goreleaser/dist
 before:
   hooks:
     - go mod tidy
 builds:
-  - main: ./cmd/debug-info/
-    id: "debug-info"
-    binary: debug-info
+  - main: ./cmd/parca-debuginfo/
+    id: "parca-debuginfo"
+    binary: parca-debuginfo
     # https://goreleaser.com/customization/build/#reproducible-builds
     mod_timestamp: '{{ .CommitTimestamp }}'
     env:
@@ -43,7 +43,7 @@ release:
   footer: |
     ## Docker images
 
-    `docker pull ghcr.io/parca-dev/debug-info:{{ .Tag }}`
+    `docker pull ghcr.io/parca-dev/parca-debuginfo:{{ .Tag }}`
 
     ## Thanks!
 

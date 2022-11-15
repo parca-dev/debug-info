@@ -31,7 +31,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@84cbf8094393cdc5fe1fe1671ff2647332956b1a # tag=v3.2.1
         with:
-          go-version-file: .go-version
+          go-version-file: 'go.mod'
           cache: true
 
       - name: Fetch all tags
@@ -43,7 +43,7 @@ jobs:
       - name: Archive generated artifacts
         uses: actions/upload-artifact@3cea5372237819ed00197afe530f5a7ea3e805c8 # tag=v3.1.0
         with:
-          name: debug-info-dist-release
+          name: parca-debuginfo-dist-release
           if-no-files-found: error
           path: |
             goreleaser/dist
@@ -77,7 +77,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@84cbf8094393cdc5fe1fe1671ff2647332956b1a # tag=v3.2.1
         with:
-          go-version-file: .go-version
+          go-version-file: 'go.mod'
           check-latest: true
 
       - name: Get branch name
@@ -86,14 +86,14 @@ jobs:
 
       - uses: actions/download-artifact@v3
         with:
-          name: debug-info-dist-release
+          name: parca-debuginfo-dist-release
           path: goreleaser/dist
 
       - name: Build container
         run: make container
 
       - name: Check images are created
-        run: podman images | grep 'ghcr.io/parca-dev/debug-info'
+        run: podman images | grep 'ghcr.io/parca-dev/parca-debuginfo'
 
       - name: Login to registry
         if: ${{ github.event_name != 'pull_request' }}
