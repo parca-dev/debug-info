@@ -49,6 +49,7 @@ type flags struct {
 		BearerTokenFile    string `kong:"help='File to read bearer token from to authenticate with store.'"`
 		Insecure           bool   `kong:"help='Send gRPC requests via plaintext instead of TLS.'"`
 		InsecureSkipVerify bool   `kong:"help='Skip TLS certificate verification.'"`
+		NoExtract          bool   `kong:"help='Do not extract debug information from binaries, just upload the binary as is.'"`
 
 		Paths []string `kong:"required,arg,name='path',help='Paths to upload.',type:'path'"`
 	} `cmd:"" help:"Upload debug information files."`
@@ -103,29 +104,48 @@ func run() error {
 			srcDst := map[string]io.WriteSeeker{}
 			srcReader := map[debuginfo.SourceInfo]io.Reader{}
 
-			buffers := []*flexbuf.Buffer{}
-			for _, path := range flags.Upload.Paths {
-				buildID, err := buildid.BuildID(path)
-				if err != nil {
-					level.Error(logger).Log("msg", "failed to extract elf build ID", "err", err)
-					continue
+			if flags.Upload.NoExtract {
+				for _, path := range flags.Upload.Paths {
+					buildID, err := buildid.BuildID(path)
+					if err != nil {
+						level.Error(logger).Log("msg", "failed to extract elf build ID", "err", err)
+						continue
+					}
+
+					f, err := os.Open(path)
+					if err != nil {
+						level.Error(logger).Log("msg", "failed to open file", "err", err)
+						continue
+					}
+					defer f.Close()
+
+					srcReader[debuginfo.SourceInfo{BuildID: buildID, Path: path}] = f
+				}
+			} else {
+				buffers := []*flexbuf.Buffer{}
+				for _, path := range flags.Upload.Paths {
+					buildID, err := buildid.BuildID(path)
+					if err != nil {
+						level.Error(logger).Log("msg", "failed to extract elf build ID", "err", err)
+						continue
+					}
+
+					buf := &flexbuf.Buffer{}
+					srcDst[path] = buf
+					srcReader[debuginfo.SourceInfo{BuildID: buildID, Path: path}] = buf
+					buffers = append(buffers, buf)
 				}
 
-				buf := &flexbuf.Buffer{}
-				srcDst[path] = buf
-				srcReader[debuginfo.SourceInfo{BuildID: buildID, Path: path}] = buf
-				buffers = append(buffers, buf)
-			}
+				if len(srcDst) == 0 {
+					return errors.New("failed to find actionable files")
+				}
 
-			if len(srcDst) == 0 {
-				return errors.New("failed to find actionable files")
-			}
-
-			if err := die.ExtractAll(ctx, srcDst); err != nil {
-				return fmt.Errorf("failed to extract debug information: %w", err)
-			}
-			for _, buf := range buffers {
-				buf.SeekStart()
+				if err := die.ExtractAll(ctx, srcDst); err != nil {
+					return fmt.Errorf("failed to extract debug information: %w", err)
+				}
+				for _, buf := range buffers {
+					buf.SeekStart()
+				}
 			}
 
 			return diu.UploadAll(ctx, srcReader)
