@@ -17,27 +17,28 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"debug/elf"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 
 	"github.com/alecthomas/kong"
 	"github.com/go-kit/log"
-	"github.com/go-kit/log/level"
 	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
 	grun "github.com/oklog/run"
+	"github.com/parca-dev/parca-agent/pkg/buildid"
+	"github.com/parca-dev/parca-agent/pkg/debuginfo"
+	debuginfopb "github.com/parca-dev/parca/gen/proto/go/parca/debuginfo/v1alpha1"
 	parcadebuginfo "github.com/parca-dev/parca/pkg/debuginfo"
+	"github.com/parca-dev/parca/pkg/hash"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rzajac/flexbuf"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
-
-	"github.com/parca-dev/parca-agent/pkg/buildid"
-	"github.com/parca-dev/parca-agent/pkg/debuginfo"
-	"github.com/parca-dev/parca-agent/pkg/logger"
 )
 
 type flags struct {
@@ -66,35 +67,31 @@ type flags struct {
 }
 
 func main() {
-	logger := log.NewLogfmtLogger(log.NewSyncWriter(os.Stdout))
-	if err := run(); err != nil {
-		level.Error(logger).Log("err", err)
-		os.Exit(1)
-	}
-	level.Info(logger).Log("msg", "done!")
-}
-
-func run() error {
 	flags := flags{}
 	kongCtx := kong.Parse(&flags)
-	logger := logger.NewLogger(flags.LogLevel, logger.LogFormatLogfmt, "")
-
-	debugInfoClient := debuginfo.NewNoopClient()
-
-	if len(flags.Upload.StoreAddress) > 0 {
-		level.Debug(logger).Log("msg", "configuration", "bearertoken", flags.Upload.BearerToken, "insecure", flags.Upload.Insecure)
-		conn, err := grpcConn(prometheus.NewRegistry(), flags)
-		if err != nil {
-			level.Error(logger).Log("err", err)
-			os.Exit(1)
-		}
-		defer conn.Close()
-
-		debugInfoClient = parcadebuginfo.NewDebugInfoClient(conn)
+	if err := run(kongCtx, flags); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
+}
 
-	die := debuginfo.NewExtractor(logger)
-	diu := debuginfo.NewUploader(logger, debugInfoClient)
+type uploadInfo struct {
+	buildID string
+	path    string
+	reader  io.ReadSeeker
+	size    int64
+}
+
+func run(kongCtx *kong.Context, flags flags) error {
+	conn, err := grpcConn(prometheus.NewRegistry(), flags)
+	if err != nil {
+		return fmt.Errorf("create gRPC connection: %w", err)
+	}
+	defer conn.Close()
+
+	debuginfoClient := debuginfopb.NewDebuginfoServiceClient(conn)
+	grpcUploadClient := parcadebuginfo.NewGrpcUploadClient(debuginfoClient)
+	extractor := debuginfo.NewExtractor(log.NewNopLogger())
 
 	var g grun.Group
 	ctx, cancel := context.WithCancel(context.Background())
@@ -102,37 +99,62 @@ func run() error {
 	case "upload <path>":
 		g.Add(func() error {
 			srcDst := map[string]io.WriteSeeker{}
-			srcReader := map[debuginfo.SourceInfo]io.Reader{}
+			uploads := []uploadInfo{}
 
 			if flags.Upload.NoExtract {
 				for _, path := range flags.Upload.Paths {
-					buildID, err := buildid.BuildID(path)
+					ef, err := elf.Open(path)
 					if err != nil {
-						level.Error(logger).Log("msg", "failed to extract elf build ID", "err", err)
-						continue
+						return fmt.Errorf("open ELF file: %w", err)
+					}
+					defer ef.Close()
+
+					buildID, err := buildid.BuildID(&buildid.ElfFile{Path: path, File: ef})
+					if err != nil {
+						return fmt.Errorf("get Build ID for %q: %w", path, err)
 					}
 
 					f, err := os.Open(path)
 					if err != nil {
-						level.Error(logger).Log("msg", "failed to open file", "err", err)
-						continue
+						return fmt.Errorf("open file: %w", err)
 					}
 					defer f.Close()
 
-					srcReader[debuginfo.SourceInfo{BuildID: buildID, Path: path}] = f
+					fi, err := f.Stat()
+					if err != nil {
+						return fmt.Errorf("stat file: %w", err)
+					}
+
+					uploads = append(uploads, uploadInfo{
+						buildID: buildID,
+						path:    path,
+						reader:  f,
+						size:    fi.Size(),
+					})
 				}
 			} else {
 				buffers := []*flexbuf.Buffer{}
 				for _, path := range flags.Upload.Paths {
-					buildID, err := buildid.BuildID(path)
+					ef, err := elf.Open(path)
 					if err != nil {
-						level.Error(logger).Log("msg", "failed to extract elf build ID", "err", err)
-						continue
+						return fmt.Errorf("open ELF file: %w", err)
+					}
+					defer ef.Close()
+
+					buildID, err := buildid.BuildID(&buildid.ElfFile{Path: path, File: ef})
+					if err != nil {
+						return fmt.Errorf("get Build ID for %q: %w", path, err)
 					}
 
 					buf := &flexbuf.Buffer{}
 					srcDst[path] = buf
-					srcReader[debuginfo.SourceInfo{BuildID: buildID, Path: path}] = buf
+
+					uploads = append(uploads, uploadInfo{
+						buildID: buildID,
+						path:    path,
+						reader:  buf,
+						size:    int64(buf.Len()),
+					})
 					buffers = append(buffers, buf)
 				}
 
@@ -140,7 +162,7 @@ func run() error {
 					return errors.New("failed to find actionable files")
 				}
 
-				if err := die.ExtractAll(ctx, srcDst); err != nil {
+				if err := extractor.ExtractAll(ctx, srcDst); err != nil {
 					return fmt.Errorf("failed to extract debug information: %w", err)
 				}
 				for _, buf := range buffers {
@@ -148,7 +170,55 @@ func run() error {
 				}
 			}
 
-			return diu.UploadAll(ctx, srcReader)
+			for _, upload := range uploads {
+				shouldInitiate, err := debuginfoClient.ShouldInitiateUpload(ctx, &debuginfopb.ShouldInitiateUploadRequest{BuildId: upload.buildID})
+				if err != nil {
+					return fmt.Errorf("check if upload should be initiated for %q with Build ID %q: %w", upload.path, upload.buildID, err)
+				}
+				if !shouldInitiate.ShouldInitiateUpload {
+					fmt.Fprintf(os.Stdout, "Skipping upload of %q with Build ID %q as the store instructed not to: %s\n", upload.path, upload.buildID, shouldInitiate.Reason)
+					continue
+				}
+
+				hash, err := hash.Reader(upload.reader)
+				if err != nil {
+					return fmt.Errorf("calculate hash of %q with Build ID %q: %w", upload.path, upload.buildID, err)
+				}
+
+				if _, err := upload.reader.Seek(0, io.SeekStart); err != nil {
+					return fmt.Errorf("seek to start of %q with Build ID %q: %w", upload.path, upload.buildID, err)
+				}
+
+				initiationResp, err := debuginfoClient.InitiateUpload(ctx, &debuginfopb.InitiateUploadRequest{
+					BuildId: upload.buildID,
+					Hash:    hash,
+					Size:    upload.size,
+				})
+				if err != nil {
+					return fmt.Errorf("initiate upload for %q with Build ID %q: %w", upload.path, upload.buildID, err)
+				}
+
+				switch initiationResp.UploadInstructions.UploadStrategy {
+				case debuginfopb.UploadInstructions_UPLOAD_STRATEGY_GRPC:
+					_, err = grpcUploadClient.Upload(ctx, initiationResp.UploadInstructions, upload.reader)
+				case debuginfopb.UploadInstructions_UPLOAD_STRATEGY_SIGNED_URL:
+					err = uploadViaSignedURL(ctx, initiationResp.UploadInstructions.SignedUrl, upload.reader)
+				case debuginfopb.UploadInstructions_UPLOAD_STRATEGY_UNSPECIFIED:
+					err = errors.New("no upload strategy specified")
+				default:
+					err = fmt.Errorf("unknown upload strategy: %v", initiationResp.UploadInstructions.UploadStrategy)
+				}
+				if err != nil {
+					return fmt.Errorf("upload %q with Build ID %q: %w", upload.path, upload.buildID, err)
+				}
+
+				_, err = debuginfoClient.MarkUploadFinished(ctx, &debuginfopb.MarkUploadFinishedRequest{BuildId: upload.buildID, UploadId: initiationResp.UploadInstructions.UploadId})
+				if err != nil {
+					return fmt.Errorf("mark upload finished for %q with Build ID %q: %w", upload.path, upload.buildID, err)
+				}
+			}
+
+			return nil
 		}, func(error) {
 			cancel()
 		})
@@ -163,25 +233,29 @@ func run() error {
 			}
 			srcDst := map[string]io.WriteSeeker{}
 			for _, path := range flags.Extract.Paths {
-				buildID, err := buildid.BuildID(path)
+				ef, err := elf.Open(path)
 				if err != nil {
-					level.Error(logger).Log("msg", "failed to extract elf build ID", "err", err)
-					continue
+					return fmt.Errorf("open ELF file: %w", err)
 				}
+				defer ef.Close()
+
+				buildID, err := buildid.BuildID(&buildid.ElfFile{Path: path, File: ef})
+				if err != nil {
+					return fmt.Errorf("get Build ID for %q: %w", path, err)
+				}
+
 				f, err := os.Open(path)
 				if err != nil {
-					level.Error(logger).Log("msg", "failed to open source file", "err", err)
-					continue
+					return fmt.Errorf("open file: %w", err)
 				}
-				f.Close()
+				defer f.Close()
 
 				// ./out/<buildid>.debuginfo
 				output := filepath.Join(flags.Extract.OutputDir, buildID+".debuginfo")
 
 				outFile, err := os.Create(output)
 				if err != nil {
-					level.Error(logger).Log("msg", "failed to create output file", "err", err)
-					continue
+					return fmt.Errorf("create output file: %w", err)
 				}
 				defer outFile.Close()
 
@@ -192,29 +266,35 @@ func run() error {
 				return errors.New("failed to find actionable files")
 			}
 
-			return die.ExtractAll(ctx, srcDst)
+			return extractor.ExtractAll(ctx, srcDst)
 		}, func(error) {
 			cancel()
 		})
 
 	case "buildid <path>":
 		g.Add(func() error {
-			id, err := buildid.BuildID(flags.Buildid.Path)
+			ef, err := elf.Open(flags.Buildid.Path)
 			if err != nil {
-				level.Error(logger).Log("msg", "failed to extract elf build ID", "err", err)
-				return err
+				return fmt.Errorf("open ELF file: %w", err)
 			}
-			if id == "" {
+			defer ef.Close()
+
+			buildID, err := buildid.BuildID(&buildid.ElfFile{Path: flags.Buildid.Path, File: ef})
+			if err != nil {
+				return fmt.Errorf("get Build ID for %q: %w", flags.Buildid.Path, err)
+			}
+
+			if buildID == "" {
 				return errors.New("failed to extract ELF build ID")
 			}
-			fmt.Fprintf(os.Stdout, "Build ID: %s\n", id)
+
+			fmt.Fprintf(os.Stdout, "Build ID: %s\n", buildID)
 			return nil
 		}, func(error) {
 			cancel()
 		})
 
 	default:
-		level.Error(logger).Log("err", "Unknown command", "cmd", kongCtx.Command())
 		cancel()
 		return errors.New("unknown command: " + kongCtx.Command())
 	}
@@ -277,4 +357,23 @@ func (t *perRequestBearerToken) GetRequestMetadata(ctx context.Context, uri ...s
 
 func (t *perRequestBearerToken) RequireTransportSecurity() bool {
 	return !t.insecure
+}
+
+func uploadViaSignedURL(ctx context.Context, url string, r io.Reader) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, r)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("do upload request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	return nil
 }
