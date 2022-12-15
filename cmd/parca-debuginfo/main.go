@@ -41,6 +41,10 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+const (
+	LogLevelDebug = "debug"
+)
+
 type flags struct {
 	LogLevel string `kong:"enum='error,warn,info,debug',help='Log level.',default='info'"`
 
@@ -198,10 +202,20 @@ func run(kongCtx *kong.Context, flags flags) error {
 					return fmt.Errorf("initiate upload for %q with Build ID %q: %w", upload.path, upload.buildID, err)
 				}
 
+				if flags.LogLevel == LogLevelDebug {
+					fmt.Fprintf(os.Stdout, "Upload instructions\nBuildID: %s\nUploadID: %s\nUploadStrategy: %s\nSignedURL: %s\n", initiationResp.UploadInstructions.BuildId, initiationResp.UploadInstructions.UploadId, initiationResp.UploadInstructions.UploadStrategy.String(), initiationResp.UploadInstructions.SignedUrl)
+				}
+
 				switch initiationResp.UploadInstructions.UploadStrategy {
 				case debuginfopb.UploadInstructions_UPLOAD_STRATEGY_GRPC:
+					if flags.LogLevel == LogLevelDebug {
+						fmt.Fprintf(os.Stdout, "Performing a gRPC upload for %q with Build ID %q.", upload.path, upload.buildID)
+					}
 					_, err = grpcUploadClient.Upload(ctx, initiationResp.UploadInstructions, upload.reader)
 				case debuginfopb.UploadInstructions_UPLOAD_STRATEGY_SIGNED_URL:
+					if flags.LogLevel == LogLevelDebug {
+						fmt.Fprintf(os.Stdout, "Performing a signed URL upload for %q with Build ID %q.", upload.path, upload.buildID)
+					}
 					err = uploadViaSignedURL(ctx, initiationResp.UploadInstructions.SignedUrl, upload.reader)
 				case debuginfopb.UploadInstructions_UPLOAD_STRATEGY_UNSPECIFIED:
 					err = errors.New("no upload strategy specified")
