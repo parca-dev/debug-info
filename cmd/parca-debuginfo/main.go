@@ -87,14 +87,6 @@ type uploadInfo struct {
 }
 
 func run(kongCtx *kong.Context, flags flags) error {
-	conn, err := grpcConn(prometheus.NewRegistry(), flags)
-	if err != nil {
-		return fmt.Errorf("create gRPC connection: %w", err)
-	}
-	defer conn.Close()
-
-	debuginfoClient := debuginfopb.NewDebuginfoServiceClient(conn)
-	grpcUploadClient := parcadebuginfo.NewGrpcUploadClient(debuginfoClient)
 	extractor := debuginfo.NewExtractor(log.NewNopLogger())
 
 	var g grun.Group
@@ -102,6 +94,15 @@ func run(kongCtx *kong.Context, flags flags) error {
 	switch kongCtx.Command() {
 	case "upload <path>":
 		g.Add(func() error {
+			conn, err := grpcConn(prometheus.NewRegistry(), flags)
+			if err != nil {
+				return fmt.Errorf("create gRPC connection: %w", err)
+			}
+			defer conn.Close()
+
+			debuginfoClient := debuginfopb.NewDebuginfoServiceClient(conn)
+			grpcUploadClient := parcadebuginfo.NewGrpcUploadClient(debuginfoClient)
+
 			srcDst := map[string]io.WriteSeeker{}
 			uploads := []uploadInfo{}
 
