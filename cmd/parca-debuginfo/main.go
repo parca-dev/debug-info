@@ -55,6 +55,7 @@ type flags struct {
 		Insecure           bool   `kong:"help='Send gRPC requests via plaintext instead of TLS.'"`
 		InsecureSkipVerify bool   `kong:"help='Skip TLS certificate verification.'"`
 		NoExtract          bool   `kong:"help='Do not extract debug information from binaries, just upload the binary as is.'"`
+		NoInitiate         bool   `kong:"help='Do not initiate the upload, just check if it should be initiated.'"`
 
 		Paths []string `kong:"required,arg,name='path',help='Paths to upload.',type:'path'"`
 	} `cmd:"" help:"Upload debug information files."`
@@ -182,6 +183,11 @@ func run(kongCtx *kong.Context, flags flags) error {
 				}
 				if !shouldInitiate.ShouldInitiateUpload {
 					fmt.Fprintf(os.Stdout, "Skipping upload of %q with Build ID %q as the store instructed not to: %s\n", upload.path, upload.buildID, shouldInitiate.Reason)
+					continue
+				}
+
+				if flags.Upload.NoInitiate {
+					fmt.Fprintf(os.Stdout, "Not initiating upload of %q with Build ID %q as requested, but would have requested that next.\n", upload.path, upload.buildID)
 					continue
 				}
 
