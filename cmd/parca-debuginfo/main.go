@@ -105,7 +105,7 @@ func run(kongCtx *kong.Context, flags flags) error {
 			grpcUploadClient := parcadebuginfo.NewGrpcUploadClient(debuginfoClient)
 
 			srcDst := map[string]io.WriteSeeker{}
-			uploads := []uploadInfo{}
+			uploads := []*uploadInfo{}
 
 			if flags.Upload.NoExtract {
 				for _, path := range flags.Upload.Paths {
@@ -131,7 +131,7 @@ func run(kongCtx *kong.Context, flags flags) error {
 						return fmt.Errorf("stat file: %w", err)
 					}
 
-					uploads = append(uploads, uploadInfo{
+					uploads = append(uploads, &uploadInfo{
 						buildID: buildID,
 						path:    path,
 						reader:  f,
@@ -139,7 +139,6 @@ func run(kongCtx *kong.Context, flags flags) error {
 					})
 				}
 			} else {
-				buffers := []*flexbuf.Buffer{}
 				for _, path := range flags.Upload.Paths {
 					ef, err := elf.Open(path)
 					if err != nil {
@@ -155,13 +154,11 @@ func run(kongCtx *kong.Context, flags flags) error {
 					buf := &flexbuf.Buffer{}
 					srcDst[path] = buf
 
-					uploads = append(uploads, uploadInfo{
+					uploads = append(uploads, &uploadInfo{
 						buildID: buildID,
 						path:    path,
 						reader:  buf,
-						size:    int64(buf.Len()),
 					})
-					buffers = append(buffers, buf)
 				}
 
 				if len(srcDst) == 0 {
@@ -171,8 +168,14 @@ func run(kongCtx *kong.Context, flags flags) error {
 				if err := extractor.ExtractAll(ctx, srcDst); err != nil {
 					return fmt.Errorf("failed to extract debug information: %w", err)
 				}
-				for _, buf := range buffers {
+				for _, upload := range uploads {
+					buf, ok := upload.reader.(*flexbuf.Buffer)
+					if !ok {
+						return fmt.Errorf("failed to cast reader to flexbuf.Buffer, something went terribly wrong as this should be the only type used")
+					}
+
 					buf.SeekStart()
+					upload.size = int64(buf.Len())
 				}
 			}
 
@@ -187,7 +190,7 @@ func run(kongCtx *kong.Context, flags flags) error {
 				}
 
 				if flags.Upload.NoInitiate {
-					fmt.Fprintf(os.Stdout, "Not initiating upload of %q with Build ID %q as requested, but would have requested that next.\n", upload.path, upload.buildID)
+					fmt.Fprintf(os.Stdout, "Not initiating upload of %q with Build ID %q as requested, but would have requested that next, because: %s\n", upload.path, upload.buildID, shouldInitiate.Reason)
 					continue
 				}
 
