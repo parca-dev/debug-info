@@ -56,6 +56,7 @@ type flags struct {
 		InsecureSkipVerify bool   `kong:"help='Skip TLS certificate verification.'"`
 		NoExtract          bool   `kong:"help='Do not extract debug information from binaries, just upload the binary as is.'"`
 		NoInitiate         bool   `kong:"help='Do not initiate the upload, just check if it should be initiated.'"`
+		Force              bool   `kong:"help='Force upload even if the Build ID is already uploaded.'"`
 
 		Paths []string `kong:"required,arg,name='path',help='Paths to upload.',type:'path'"`
 	} `cmd:"" help:"Upload debug information files."`
@@ -180,7 +181,10 @@ func run(kongCtx *kong.Context, flags flags) error {
 			}
 
 			for _, upload := range uploads {
-				shouldInitiate, err := debuginfoClient.ShouldInitiateUpload(ctx, &debuginfopb.ShouldInitiateUploadRequest{BuildId: upload.buildID})
+				shouldInitiate, err := debuginfoClient.ShouldInitiateUpload(ctx, &debuginfopb.ShouldInitiateUploadRequest{
+					BuildId: upload.buildID,
+					Force:   flags.Upload.Force,
+				})
 				if err != nil {
 					return fmt.Errorf("check if upload should be initiated for %q with Build ID %q: %w", upload.path, upload.buildID, err)
 				}
@@ -207,6 +211,7 @@ func run(kongCtx *kong.Context, flags flags) error {
 					BuildId: upload.buildID,
 					Hash:    hash,
 					Size:    upload.size,
+					Force:   flags.Upload.Force,
 				})
 				if err != nil {
 					return fmt.Errorf("initiate upload for %q with Build ID %q: %w", upload.path, upload.buildID, err)
