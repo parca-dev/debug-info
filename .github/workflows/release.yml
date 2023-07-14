@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     container:
-      image: docker.io/goreleaser/goreleaser-cross:v1.18.3
+      image: docker.io/goreleaser/goreleaser-cross:v1.20.6
       options: --privileged
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -55,11 +55,11 @@ jobs:
     needs: binaries
     steps:
       - uses: actions/checkout@93ea575cb5d8a053eaa0ac8fa3b40d7e05a33cc8 # tag=v3.1.0
-      
+
       - name: Publish Vercel
         run: |
           curl -X POST "https://api.vercel.com/v1/integrations/deploy/${{ secrets.VERCEL_WEBHOOK }}"
-          
+
   container:
     name: Build and release container images
     runs-on: ubuntu-latest
