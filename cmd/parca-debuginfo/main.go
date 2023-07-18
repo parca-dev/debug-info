@@ -50,7 +50,7 @@ type flags struct {
 
 	Upload struct {
 		StoreAddress       string `kong:"required,help='gRPC address to sends symbols to.'"`
-		BearerToken        string `kong:"help='Bearer token to authenticate with store.'"`
+		BearerToken        string `kong:"help='Bearer token to authenticate with store.',env='PARCA_DEBUGINFO_BEARER_TOKEN'"`
 		BearerTokenFile    string `kong:"help='File to read bearer token from to authenticate with store.'"`
 		Insecure           bool   `kong:"help='Send gRPC requests via plaintext instead of TLS.'"`
 		InsecureSkipVerify bool   `kong:"help='Skip TLS certificate verification.'"`
