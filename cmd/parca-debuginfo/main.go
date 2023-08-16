@@ -57,6 +57,8 @@ type flags struct {
 		NoExtract          bool   `kong:"help='Do not extract debug information from binaries, just upload the binary as is.'"`
 		NoInitiate         bool   `kong:"help='Do not initiate the upload, just check if it should be initiated.'"`
 		Force              bool   `kong:"help='Force upload even if the Build ID is already uploaded.'"`
+		Type               string `kong:"enum='debuginfo,executable,sources',help='Type of the debug information to upload.',default='debuginfo'"`
+		BuildID            string `kong:"help='Build ID of the binary to upload.'"`
 
 		Paths []string `kong:"required,arg,name='path',help='Paths to upload.',type:'path'"`
 	} `cmd:"" help:"Upload debug information files."`
@@ -108,38 +110,7 @@ func run(kongCtx *kong.Context, flags flags) error {
 			srcDst := map[string]io.WriteSeeker{}
 			uploads := []*uploadInfo{}
 
-			if flags.Upload.NoExtract {
-				for _, path := range flags.Upload.Paths {
-					ef, err := elf.Open(path)
-					if err != nil {
-						return fmt.Errorf("open ELF file: %w", err)
-					}
-					defer ef.Close()
-
-					buildID, err := buildid.BuildID(&buildid.ElfFile{Path: path, File: ef})
-					if err != nil {
-						return fmt.Errorf("get Build ID for %q: %w", path, err)
-					}
-
-					f, err := os.Open(path)
-					if err != nil {
-						return fmt.Errorf("open file: %w", err)
-					}
-					defer f.Close()
-
-					fi, err := f.Stat()
-					if err != nil {
-						return fmt.Errorf("stat file: %w", err)
-					}
-
-					uploads = append(uploads, &uploadInfo{
-						buildID: buildID,
-						path:    path,
-						reader:  f,
-						size:    fi.Size(),
-					})
-				}
-			} else {
+			if !flags.Upload.NoExtract && flags.Upload.Type == "debuginfo" {
 				for _, path := range flags.Upload.Paths {
 					ef, err := elf.Open(path)
 					if err != nil {
@@ -178,12 +149,48 @@ func run(kongCtx *kong.Context, flags flags) error {
 					buf.SeekStart()
 					upload.size = int64(buf.Len())
 				}
+			} else {
+				for _, path := range flags.Upload.Paths {
+					buildID := flags.Upload.BuildID
+
+					if flags.Upload.Type == "debuginfo" {
+						ef, err := elf.Open(path)
+						if err != nil {
+							return fmt.Errorf("open ELF file: %w", err)
+						}
+						defer ef.Close()
+
+						buildID, err = buildid.BuildID(&buildid.ElfFile{Path: path, File: ef})
+						if err != nil {
+							return fmt.Errorf("get Build ID for %q: %w", path, err)
+						}
+					}
+
+					f, err := os.Open(path)
+					if err != nil {
+						return fmt.Errorf("open file: %w", err)
+					}
+					defer f.Close()
+
+					fi, err := f.Stat()
+					if err != nil {
+						return fmt.Errorf("stat file: %w", err)
+					}
+
+					uploads = append(uploads, &uploadInfo{
+						buildID: buildID,
+						path:    path,
+						reader:  f,
+						size:    fi.Size(),
+					})
+				}
 			}
 
 			for _, upload := range uploads {
 				shouldInitiate, err := debuginfoClient.ShouldInitiateUpload(ctx, &debuginfopb.ShouldInitiateUploadRequest{
 					BuildId: upload.buildID,
 					Force:   flags.Upload.Force,
+					Type:    debuginfoTypeStringToPb(flags.Upload.Type),
 				})
 				if err != nil {
 					return fmt.Errorf("check if upload should be initiated for %q with Build ID %q: %w", upload.path, upload.buildID, err)
@@ -212,13 +219,14 @@ func run(kongCtx *kong.Context, flags flags) error {
 					Hash:    hash,
 					Size:    upload.size,
 					Force:   flags.Upload.Force,
+					Type:    debuginfoTypeStringToPb(flags.Upload.Type),
 				})
 				if err != nil {
 					return fmt.Errorf("initiate upload for %q with Build ID %q: %w", upload.path, upload.buildID, err)
 				}
 
 				if flags.LogLevel == LogLevelDebug {
-					fmt.Fprintf(os.Stdout, "Upload instructions\nBuildID: %s\nUploadID: %s\nUploadStrategy: %s\nSignedURL: %s\n", initiationResp.UploadInstructions.BuildId, initiationResp.UploadInstructions.UploadId, initiationResp.UploadInstructions.UploadStrategy.String(), initiationResp.UploadInstructions.SignedUrl)
+					fmt.Fprintf(os.Stdout, "Upload instructions\nBuildID: %s\nUploadID: %s\nUploadStrategy: %s\nSignedURL: %s\nType: %s\n", initiationResp.UploadInstructions.BuildId, initiationResp.UploadInstructions.UploadId, initiationResp.UploadInstructions.UploadStrategy.String(), initiationResp.UploadInstructions.SignedUrl, initiationResp.UploadInstructions.Type)
 				}
 
 				switch initiationResp.UploadInstructions.UploadStrategy {
@@ -241,7 +249,11 @@ func run(kongCtx *kong.Context, flags flags) error {
 					return fmt.Errorf("upload %q with Build ID %q: %w", upload.path, upload.buildID, err)
 				}
 
-				_, err = debuginfoClient.MarkUploadFinished(ctx, &debuginfopb.MarkUploadFinishedRequest{BuildId: upload.buildID, UploadId: initiationResp.UploadInstructions.UploadId})
+				_, err = debuginfoClient.MarkUploadFinished(ctx, &debuginfopb.MarkUploadFinishedRequest{
+					BuildId:  upload.buildID,
+					UploadId: initiationResp.UploadInstructions.UploadId,
+					Type:     debuginfoTypeStringToPb(flags.Upload.Type),
+				})
 				if err != nil {
 					return fmt.Errorf("mark upload finished for %q with Build ID %q: %w", upload.path, upload.buildID, err)
 				}
@@ -317,7 +329,7 @@ func run(kongCtx *kong.Context, flags flags) error {
 				return errors.New("failed to extract ELF build ID")
 			}
 
-			fmt.Fprintf(os.Stdout, "Build ID: %s\n", buildID)
+			fmt.Fprintf(os.Stdout, "%s", buildID)
 			return nil
 		}, func(error) {
 			cancel()
@@ -405,4 +417,15 @@ func uploadViaSignedURL(ctx context.Context, url string, r io.Reader) error {
 	}
 
 	return nil
+}
+
+func debuginfoTypeStringToPb(s string) debuginfopb.DebuginfoType {
+	switch s {
+	case "executable":
+		return debuginfopb.DebuginfoType_DEBUGINFO_TYPE_EXECUTABLE
+	case "sources":
+		return debuginfopb.DebuginfoType_DEBUGINFO_TYPE_SOURCES
+	default:
+		return debuginfopb.DebuginfoType_DEBUGINFO_TYPE_DEBUGINFO_UNSPECIFIED
+	}
 }
