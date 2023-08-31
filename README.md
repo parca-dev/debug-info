@@ -27,5 +27,8 @@ Commands:
   buildid <path>
     Extract buildid.
 
+  source <debuginfo-path> [<out-path>]
+    Build a source archive by discovering files from a given debuginfo file.
+
 Run "parca-debuginfo <command> --help" for more information on a command.
 ```
