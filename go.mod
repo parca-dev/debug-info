@@ -6,6 +6,7 @@ require (
 	github.com/alecthomas/kong v0.8.0
 	github.com/go-kit/log v0.2.1
 	github.com/grpc-ecosystem/go-grpc-prometheus v1.2.0
+	github.com/klauspost/compress v1.16.7
 	github.com/oklog/run v1.1.0
 	github.com/parca-dev/parca v0.18.1-0.20230816074650-c9b9bed904c3
 	github.com/parca-dev/parca-agent v0.12.1-0.20230216133018-8dd5ccaeef0f
@@ -64,7 +65,6 @@ require (
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/huaweicloud/huaweicloud-sdk-go-obs v3.23.3+incompatible // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
-	github.com/klauspost/compress v1.16.7 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.5 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.4 // indirect

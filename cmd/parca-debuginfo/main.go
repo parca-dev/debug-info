@@ -15,8 +15,10 @@
 package main
 
 import (
+	"archive/tar"
 	"context"
 	"crypto/tls"
+	"debug/dwarf"
 	"debug/elf"
 	"errors"
 	"fmt"
@@ -28,6 +30,7 @@ import (
 	"github.com/alecthomas/kong"
 	"github.com/go-kit/log"
 	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
+	"github.com/klauspost/compress/zstd"
 	grun "github.com/oklog/run"
 	"github.com/parca-dev/parca-agent/pkg/buildid"
 	"github.com/parca-dev/parca-agent/pkg/debuginfo"
@@ -72,6 +75,11 @@ type flags struct {
 	Buildid struct {
 		Path string `kong:"required,arg,name='path',help='Paths to extract buildid.',type:'path'"`
 	} `cmd:"" help:"Extract buildid."`
+
+	Source struct {
+		DebuginfoPath string `kong:"required,arg,name='debuginfo-path',help='Path to debuginfo file',type:'path'"`
+		OutPath       string `kong:"arg,name='out-path',help='Path to output archive file',type:'path',default='source.tar.zstd'"`
+	} `cmd:"" help:"Build a source archive by discovering files from a given debuginfo file."`
 }
 
 func main() {
@@ -330,6 +338,99 @@ func run(kongCtx *kong.Context, flags flags) error {
 			}
 
 			fmt.Fprintf(os.Stdout, "%s", buildID)
+			return nil
+		}, func(error) {
+			cancel()
+		})
+
+	case "source <debuginfo-path>":
+		g.Add(func() error {
+			f, err := elf.Open(flags.Source.DebuginfoPath)
+			if err != nil {
+				return fmt.Errorf("open elf: %w", err)
+			}
+			defer f.Close()
+
+			sf, err := os.Create(flags.Source.OutPath)
+			if err != nil {
+				return fmt.Errorf("create source archive: %w", err)
+			}
+			defer sf.Close()
+
+			zw, err := zstd.NewWriter(sf)
+			if err != nil {
+				return fmt.Errorf("create zstd writer: %w", err)
+			}
+
+			tw := tar.NewWriter(zw)
+
+			d, err := f.DWARF()
+			if err != nil {
+				return fmt.Errorf("get dwarf data: %w", err)
+			}
+
+			r := d.Reader()
+			seen := map[string]struct{}{}
+			for {
+				e, err := r.Next()
+				if err != nil {
+					return fmt.Errorf("read DWARF entry: %w", err)
+				}
+				if e == nil {
+					break
+				}
+
+				if e.Tag == dwarf.TagCompileUnit {
+					lr, err := d.LineReader(e)
+					if err != nil {
+						return fmt.Errorf("get line reader: %w", err)
+					}
+
+					if lr == nil {
+						continue
+					}
+
+					for _, lineFile := range lr.Files() {
+						if lineFile == nil {
+							continue
+						}
+						if _, ok := seen[lineFile.Name]; !ok {
+							sourceFile, err := os.Open(lineFile.Name)
+							if errors.Is(err, os.ErrNotExist) {
+								fmt.Fprintf(os.Stderr, "skipping file %q: does not exist\n", lineFile.Name)
+								seen[lineFile.Name] = struct{}{}
+								continue
+							}
+							if err != nil {
+								return fmt.Errorf("open file: %w", err)
+							}
+
+							stat, err := sourceFile.Stat()
+							if err != nil {
+								return fmt.Errorf("stat file: %w", err)
+							}
+
+							if err := tw.WriteHeader(&tar.Header{
+								Name: lineFile.Name,
+								Size: stat.Size(),
+							}); err != nil {
+								return fmt.Errorf("write tar header: %w", err)
+							}
+
+							if _, err = io.Copy(tw, sourceFile); err != nil {
+								return fmt.Errorf("copy file to tar: %w", err)
+							}
+
+							if err := sourceFile.Close(); err != nil {
+								return fmt.Errorf("close file: %w", err)
+							}
+
+							seen[lineFile.Name] = struct{}{}
+						}
+					}
+				}
+			}
+
 			return nil
 		}, func(error) {
 			cancel()
