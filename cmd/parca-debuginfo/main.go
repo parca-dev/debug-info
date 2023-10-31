@@ -33,12 +33,13 @@ import (
 	"github.com/klauspost/compress/zstd"
 	grun "github.com/oklog/run"
 	"github.com/parca-dev/parca-agent/pkg/buildid"
-	"github.com/parca-dev/parca-agent/pkg/debuginfo"
+	"github.com/parca-dev/parca-agent/pkg/elfwriter"
 	debuginfopb "github.com/parca-dev/parca/gen/proto/go/parca/debuginfo/v1alpha1"
 	parcadebuginfo "github.com/parca-dev/parca/pkg/debuginfo"
 	"github.com/parca-dev/parca/pkg/hash"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rzajac/flexbuf"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -69,7 +70,9 @@ type flags struct {
 	Extract struct {
 		OutputDir string `kong:"help='Output directory path to use for extracted debug information files.',default='out'"`
 
-		Paths []string `kong:"required,arg,name='path',help='Paths to extract debug information.',type:'path'"`
+		Paths                 []string `kong:"required,arg,name='path',help='Paths to extract debug information.',type:'path'"`
+		CompressDWARFSections bool     `kong:"default=false,help:'Compress debuginfo files DWARF sections before uploading.'"`
+		Mode                  string   `kong:"default='keep-only-debug',enum='keep-only-debug,strip-debug'"`
 	} `cmd:"" help:"Extract debug information."`
 
 	Buildid struct {
@@ -99,7 +102,11 @@ type uploadInfo struct {
 }
 
 func run(kongCtx *kong.Context, flags flags) error {
-	extractor := debuginfo.NewExtractor(log.NewNopLogger())
+	opts := []elfwriter.Option{}
+	if flags.Extract.CompressDWARFSections {
+		opts = append(opts, elfwriter.WithCompressDWARFSections())
+	}
+	extractor := elfwriter.NewExtractor(log.NewNopLogger(), trace.NewNoopTracerProvider().Tracer("noop"), opts...)
 
 	var g grun.Group
 	ctx, cancel := context.WithCancel(context.Background())
@@ -126,7 +133,7 @@ func run(kongCtx *kong.Context, flags flags) error {
 					}
 					defer ef.Close()
 
-					buildID, err := buildid.BuildID(&buildid.ElfFile{Path: path, File: ef})
+					buildID, err := buildid.FromELF(ef)
 					if err != nil {
 						return fmt.Errorf("get Build ID for %q: %w", path, err)
 					}
@@ -145,7 +152,7 @@ func run(kongCtx *kong.Context, flags flags) error {
 					return errors.New("failed to find actionable files")
 				}
 
-				if err := extractor.ExtractAll(ctx, srcDst); err != nil {
+				if err := extractAll(ctx, extractor, flags.Extract.Mode, srcDst); err != nil {
 					return fmt.Errorf("failed to extract debug information: %w", err)
 				}
 				for _, upload := range uploads {
@@ -168,7 +175,7 @@ func run(kongCtx *kong.Context, flags flags) error {
 						}
 						defer ef.Close()
 
-						buildID, err = buildid.BuildID(&buildid.ElfFile{Path: path, File: ef})
+						buildID, err = buildid.FromELF(ef)
 						if err != nil {
 							return fmt.Errorf("get Build ID for %q: %w", path, err)
 						}
@@ -288,7 +295,7 @@ func run(kongCtx *kong.Context, flags flags) error {
 				}
 				defer ef.Close()
 
-				buildID, err := buildid.BuildID(&buildid.ElfFile{Path: path, File: ef})
+				buildID, err := buildid.FromELF(ef)
 				if err != nil {
 					return fmt.Errorf("get Build ID for %q: %w", path, err)
 				}
@@ -315,7 +322,7 @@ func run(kongCtx *kong.Context, flags flags) error {
 				return errors.New("failed to find actionable files")
 			}
 
-			return extractor.ExtractAll(ctx, srcDst)
+			return extractAll(ctx, extractor, flags.Extract.Mode, srcDst)
 		}, func(error) {
 			cancel()
 		})
@@ -328,7 +335,7 @@ func run(kongCtx *kong.Context, flags flags) error {
 			}
 			defer ef.Close()
 
-			buildID, err := buildid.BuildID(&buildid.ElfFile{Path: flags.Buildid.Path, File: ef})
+			buildID, err := buildid.FromELF(ef)
 			if err != nil {
 				return fmt.Errorf("get Build ID for %q: %w", flags.Buildid.Path, err)
 			}
@@ -443,6 +450,34 @@ func run(kongCtx *kong.Context, flags flags) error {
 
 	g.Add(grun.SignalHandler(ctx, os.Interrupt, os.Kill))
 	return g.Run()
+}
+
+// extractAll extracts debug information from the given executables.
+// It consumes a map of file sources to extract and a destination io.Writer.
+func extractAll(ctx context.Context, e *elfwriter.Extractor, mode string, srcDsts map[string]io.WriteSeeker) error {
+	var result error
+	for src, dst := range srcDsts {
+		f, err := os.Open(src)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to open file: %s, %v", src, err)
+			result = errors.Join(result, err)
+			continue
+		}
+		defer f.Close()
+
+		var extractFn func(context.Context, io.WriteSeeker, io.ReaderAt) error
+		if mode == "strip-debug" {
+			extractFn = e.StripDebug
+		} else {
+			extractFn = e.OnlyKeepDebug
+		}
+
+		if err := extractFn(ctx, dst, f); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to extract debug information: %s, %v", src, err)
+			result = errors.Join(result, err)
+		}
+	}
+	return result
 }
 
 func grpcConn(reg prometheus.Registerer, flags flags) (*grpc.ClientConn, error) {
