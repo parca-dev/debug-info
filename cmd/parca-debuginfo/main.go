@@ -163,6 +163,10 @@ func run(kongCtx *kong.Context, flags flags) error {
 
 					buf.SeekStart()
 					upload.size = int64(buf.Len())
+
+					if upload.size == 0 {
+						return fmt.Errorf("extracted debug information from %q is empty, but must not be empty", upload.path)
+					}
 				}
 			} else {
 				for _, path := range flags.Upload.Paths {
@@ -190,6 +194,10 @@ func run(kongCtx *kong.Context, flags flags) error {
 					fi, err := f.Stat()
 					if err != nil {
 						return fmt.Errorf("stat file: %w", err)
+					}
+
+					if fi.Size() == 0 {
+						return fmt.Errorf("file %q is empty, but must not be empty", path)
 					}
 
 					uploads = append(uploads, &uploadInfo{
