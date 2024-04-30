@@ -172,7 +172,7 @@ func run(kongCtx *kong.Context, flags flags) error {
 				for _, path := range flags.Upload.Paths {
 					buildID := flags.Upload.BuildID
 
-					if flags.Upload.Type == "debuginfo" {
+					if flags.Upload.Type == "debuginfo" && buildID == "" {
 						ef, err := elf.Open(path)
 						if err != nil {
 							return fmt.Errorf("open ELF file: %w", err)
