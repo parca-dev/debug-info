@@ -376,8 +376,10 @@ func run(kongCtx *kong.Context, flags flags) error {
 			if err != nil {
 				return fmt.Errorf("create zstd writer: %w", err)
 			}
+			defer zw.Close()
 
 			tw := tar.NewWriter(zw)
+			defer tw.Close()
 
 			d, err := f.DWARF()
 			if err != nil {
