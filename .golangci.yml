@@ -13,28 +13,21 @@ linters:
     - style
     - unused
   disable:
-    - exhaustivestruct
     - exhaustruct
     - funlen
     - gci
     - gochecknoglobals
     - godox
-    - goerr113
-    - golint
-    - gomnd
     - gomoddirectives
-    - interfacer
     - ireturn
     - lll
-    - maligned
     - nlreturn
     - paralleltest
-    - scopelint
     - testpackage
     - varnamelen
     - wrapcheck
     - wsl
-    - nosnakecase
+    - err113
 
 issues:
   exclude-rules:
@@ -56,7 +49,7 @@ linters-settings:
           - pkg: github.com/pkg/errors
             desc: Use fmt.Errorf instead
   errcheck:
-    exclude: ./.errcheck_excludes.txt
+    exclude-functions: ./.errcheck_excludes.txt
   goimports:
     local-prefixes: github.com/parca-dev/parca-debuginfo
   gofumpt:

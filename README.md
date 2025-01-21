@@ -11,23 +11,23 @@ Flags:
 
 [embedmd]:# (dist/help.txt)
 ```txt
-Usage: parca-debuginfo <command>
+Usage: parca-debuginfo <command> [flags]
 
 Flags:
   -h, --help                Show context-sensitive help.
       --log-level="info"    Log level.
 
 Commands:
-  upload --store-address=STRING <path> ...
+  upload --store-address=STRING <path> [flags]
     Upload debug information files.
 
-  extract <path> ...
+  extract <path> ... [flags]
     Extract debug information.
 
-  buildid <path>
+  buildid <path> [flags]
     Extract buildid.
 
-  source <debuginfo-path> [<out-path>]
+  source <debuginfo-path> [<out-path>] [flags]
     Build a source archive by discovering files from a given debuginfo file.
 
 Run "parca-debuginfo <command> --help" for more information on a command.
