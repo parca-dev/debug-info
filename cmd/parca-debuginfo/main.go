@@ -16,10 +16,13 @@ package main
 
 import (
 	"archive/tar"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"debug/dwarf"
 	"debug/elf"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -28,18 +31,15 @@ import (
 	"path/filepath"
 
 	"github.com/alecthomas/kong"
-	"github.com/go-kit/log"
 	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
 	"github.com/klauspost/compress/zstd"
 	grun "github.com/oklog/run"
-	"github.com/parca-dev/parca-agent/pkg/buildid"
-	"github.com/parca-dev/parca-agent/pkg/elfwriter"
+	"github.com/parca-dev/parca-agent/reporter/elfwriter"
 	debuginfopb "github.com/parca-dev/parca/gen/proto/go/parca/debuginfo/v1alpha1"
 	parcadebuginfo "github.com/parca-dev/parca/pkg/debuginfo"
 	"github.com/parca-dev/parca/pkg/hash"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rzajac/flexbuf"
-	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -64,7 +64,7 @@ type flags struct {
 		Type               string `kong:"enum='debuginfo,executable,sources',help='Type of the debug information to upload.',default='debuginfo'"`
 		BuildID            string `kong:"help='Build ID of the binary to upload.'"`
 
-		Paths []string `kong:"required,arg,name='path',help='Paths to upload.',type:'path'"`
+		Path string `kong:"required,arg,name='path',help='Paths to upload.',type:'path'"`
 	} `cmd:"" help:"Upload debug information files."`
 
 	Extract struct {
@@ -72,7 +72,6 @@ type flags struct {
 
 		Paths                 []string `kong:"required,arg,name='path',help='Paths to extract debug information.',type:'path'"`
 		CompressDWARFSections bool     `kong:"default=false,help:'Compress debuginfo files DWARF sections before uploading.'"`
-		Mode                  string   `kong:"default='keep-only-debug',enum='keep-only-debug,strip-debug'"`
 	} `cmd:"" help:"Extract debug information."`
 
 	Buildid struct {
@@ -106,7 +105,6 @@ func run(kongCtx *kong.Context, flags flags) error {
 	if flags.Extract.CompressDWARFSections {
 		opts = append(opts, elfwriter.WithCompressDWARFSections())
 	}
-	extractor := elfwriter.NewExtractor(log.NewNopLogger(), trace.NewNoopTracerProvider().Tracer("noop"), opts...)
 
 	var g grun.Group
 	ctx, cancel := context.WithCancel(context.Background())
@@ -122,164 +120,144 @@ func run(kongCtx *kong.Context, flags flags) error {
 			debuginfoClient := debuginfopb.NewDebuginfoServiceClient(conn)
 			grpcUploadClient := parcadebuginfo.NewGrpcUploadClient(debuginfoClient)
 
-			srcDst := map[string]io.WriteSeeker{}
-			uploads := []*uploadInfo{}
+			var (
+				buildID string
+				reader  io.ReadSeeker
+				size    int64
+			)
 
 			if !flags.Upload.NoExtract && flags.Upload.Type == "debuginfo" {
-				for _, path := range flags.Upload.Paths {
-					ef, err := elf.Open(path)
+				f, err := os.Open(flags.Upload.Path)
+				if err != nil {
+					return fmt.Errorf("open file: %w", err)
+				}
+
+				ef, err := elf.NewFile(f)
+				if err != nil {
+					return fmt.Errorf("open ELF file: %w", err)
+				}
+				defer ef.Close()
+
+				buildID, err = GetBuildID(ef)
+				if err != nil {
+					return fmt.Errorf("get Build ID for %q: %w", flags.Upload.Path, err)
+				}
+
+				buf := &flexbuf.Buffer{}
+				if err := elfwriter.OnlyKeepDebug(buf, f); err != nil {
+					return fmt.Errorf("failed to extract debug information: %w", err)
+				}
+
+				size = int64(buf.Len())
+				buf.SeekStart()
+				reader = buf
+
+				if size == 0 {
+					return fmt.Errorf("extracted debug information from %q is empty, but must not be empty", flags.Upload.Path)
+				}
+			} else {
+				buildID = flags.Upload.BuildID
+
+				if flags.Upload.Type == "debuginfo" && buildID == "" {
+					ef, err := elf.Open(flags.Upload.Path)
 					if err != nil {
 						return fmt.Errorf("open ELF file: %w", err)
 					}
 					defer ef.Close()
 
-					buildID, err := buildid.FromELF(ef)
+					buildID, err = GetBuildID(ef)
 					if err != nil {
-						return fmt.Errorf("get Build ID for %q: %w", path, err)
-					}
-
-					buf := &flexbuf.Buffer{}
-					srcDst[path] = buf
-
-					uploads = append(uploads, &uploadInfo{
-						buildID: buildID,
-						path:    path,
-						reader:  buf,
-					})
-				}
-
-				if len(srcDst) == 0 {
-					return errors.New("failed to find actionable files")
-				}
-
-				if err := extractAll(ctx, extractor, flags.Extract.Mode, srcDst); err != nil {
-					return fmt.Errorf("failed to extract debug information: %w", err)
-				}
-				for _, upload := range uploads {
-					buf, ok := upload.reader.(*flexbuf.Buffer)
-					if !ok {
-						return fmt.Errorf("failed to cast reader to flexbuf.Buffer, something went terribly wrong as this should be the only type used")
-					}
-
-					buf.SeekStart()
-					upload.size = int64(buf.Len())
-
-					if upload.size == 0 {
-						return fmt.Errorf("extracted debug information from %q is empty, but must not be empty", upload.path)
+						return fmt.Errorf("get Build ID for %q: %w", flags.Upload.Path, err)
 					}
 				}
-			} else {
-				for _, path := range flags.Upload.Paths {
-					buildID := flags.Upload.BuildID
 
-					if flags.Upload.Type == "debuginfo" && buildID == "" {
-						ef, err := elf.Open(path)
-						if err != nil {
-							return fmt.Errorf("open ELF file: %w", err)
-						}
-						defer ef.Close()
-
-						buildID, err = buildid.FromELF(ef)
-						if err != nil {
-							return fmt.Errorf("get Build ID for %q: %w", path, err)
-						}
-					}
-
-					f, err := os.Open(path)
-					if err != nil {
-						return fmt.Errorf("open file: %w", err)
-					}
-					defer f.Close()
-
-					fi, err := f.Stat()
-					if err != nil {
-						return fmt.Errorf("stat file: %w", err)
-					}
-
-					if fi.Size() == 0 {
-						return fmt.Errorf("file %q is empty, but must not be empty", path)
-					}
-
-					uploads = append(uploads, &uploadInfo{
-						buildID: buildID,
-						path:    path,
-						reader:  f,
-						size:    fi.Size(),
-					})
+				f, err := os.Open(flags.Upload.Path)
+				if err != nil {
+					return fmt.Errorf("open file: %w", err)
 				}
+				defer f.Close()
+
+				fi, err := f.Stat()
+				if err != nil {
+					return fmt.Errorf("stat file: %w", err)
+				}
+
+				if fi.Size() == 0 {
+					return fmt.Errorf("file %q is empty, but must not be empty", flags.Upload.Path)
+				}
+				reader = f
+				size = fi.Size()
 			}
 
-			for _, upload := range uploads {
-				shouldInitiate, err := debuginfoClient.ShouldInitiateUpload(ctx, &debuginfopb.ShouldInitiateUploadRequest{
-					BuildId: upload.buildID,
-					Force:   flags.Upload.Force,
-					Type:    debuginfoTypeStringToPb(flags.Upload.Type),
-				})
-				if err != nil {
-					return fmt.Errorf("check if upload should be initiated for %q with Build ID %q: %w", upload.path, upload.buildID, err)
-				}
-				if !shouldInitiate.ShouldInitiateUpload {
-					fmt.Fprintf(os.Stdout, "Skipping upload of %q with Build ID %q as the store instructed not to: %s\n", upload.path, upload.buildID, shouldInitiate.Reason)
-					continue
-				}
+			shouldInitiate, err := debuginfoClient.ShouldInitiateUpload(ctx, &debuginfopb.ShouldInitiateUploadRequest{
+				BuildId: buildID,
+				Force:   flags.Upload.Force,
+				Type:    debuginfoTypeStringToPb(flags.Upload.Type),
+			})
+			if err != nil {
+				return fmt.Errorf("check if upload should be initiated for %q with Build ID %q: %w", flags.Upload.Path, buildID, err)
+			}
+			if !shouldInitiate.ShouldInitiateUpload {
+				fmt.Fprintf(os.Stdout, "Skipping upload of %q with Build ID %q as the store instructed not to: %s\n", flags.Upload.Path, buildID, shouldInitiate.Reason)
+				return nil
+			}
 
-				if flags.Upload.NoInitiate {
-					fmt.Fprintf(os.Stdout, "Not initiating upload of %q with Build ID %q as requested, but would have requested that next, because: %s\n", upload.path, upload.buildID, shouldInitiate.Reason)
-					continue
-				}
+			if flags.Upload.NoInitiate {
+				fmt.Fprintf(os.Stdout, "Not initiating upload of %q with Build ID %q as requested, but would have requested that next, because: %s\n", flags.Upload.Path, buildID, shouldInitiate.Reason)
+				return nil
+			}
 
-				hash, err := hash.Reader(upload.reader)
-				if err != nil {
-					return fmt.Errorf("calculate hash of %q with Build ID %q: %w", upload.path, upload.buildID, err)
-				}
+			hash, err := hash.Reader(reader)
+			if err != nil {
+				return fmt.Errorf("calculate hash of %q with Build ID %q: %w", flags.Upload.Path, buildID, err)
+			}
 
-				if _, err := upload.reader.Seek(0, io.SeekStart); err != nil {
-					return fmt.Errorf("seek to start of %q with Build ID %q: %w", upload.path, upload.buildID, err)
-				}
+			if _, err := reader.Seek(0, io.SeekStart); err != nil {
+				return fmt.Errorf("seek to start of %q with Build ID %q: %w", flags.Upload.Path, buildID, err)
+			}
 
-				initiationResp, err := debuginfoClient.InitiateUpload(ctx, &debuginfopb.InitiateUploadRequest{
-					BuildId: upload.buildID,
-					Hash:    hash,
-					Size:    upload.size,
-					Force:   flags.Upload.Force,
-					Type:    debuginfoTypeStringToPb(flags.Upload.Type),
-				})
-				if err != nil {
-					return fmt.Errorf("initiate upload for %q with Build ID %q: %w", upload.path, upload.buildID, err)
-				}
+			initiationResp, err := debuginfoClient.InitiateUpload(ctx, &debuginfopb.InitiateUploadRequest{
+				BuildId: buildID,
+				Hash:    hash,
+				Size:    size,
+				Force:   flags.Upload.Force,
+				Type:    debuginfoTypeStringToPb(flags.Upload.Type),
+			})
+			if err != nil {
+				return fmt.Errorf("initiate upload for %q with Build ID %q: %w", flags.Upload.Path, buildID, err)
+			}
 
+			if flags.LogLevel == LogLevelDebug {
+				fmt.Fprintf(os.Stdout, "Upload instructions\nBuildID: %s\nUploadID: %s\nUploadStrategy: %s\nSignedURL: %s\nType: %s\n", initiationResp.UploadInstructions.BuildId, initiationResp.UploadInstructions.UploadId, initiationResp.UploadInstructions.UploadStrategy.String(), initiationResp.UploadInstructions.SignedUrl, initiationResp.UploadInstructions.Type)
+			}
+
+			switch initiationResp.UploadInstructions.UploadStrategy {
+			case debuginfopb.UploadInstructions_UPLOAD_STRATEGY_GRPC:
 				if flags.LogLevel == LogLevelDebug {
-					fmt.Fprintf(os.Stdout, "Upload instructions\nBuildID: %s\nUploadID: %s\nUploadStrategy: %s\nSignedURL: %s\nType: %s\n", initiationResp.UploadInstructions.BuildId, initiationResp.UploadInstructions.UploadId, initiationResp.UploadInstructions.UploadStrategy.String(), initiationResp.UploadInstructions.SignedUrl, initiationResp.UploadInstructions.Type)
+					fmt.Fprintf(os.Stdout, "Performing a gRPC upload for %q with Build ID %q.", flags.Upload.Path, buildID)
 				}
+				_, err = grpcUploadClient.Upload(ctx, initiationResp.UploadInstructions, reader)
+			case debuginfopb.UploadInstructions_UPLOAD_STRATEGY_SIGNED_URL:
+				if flags.LogLevel == LogLevelDebug {
+					fmt.Fprintf(os.Stdout, "Performing a signed URL upload for %q with Build ID %q.", flags.Upload.Path, buildID)
+				}
+				err = uploadViaSignedURL(ctx, initiationResp.UploadInstructions.SignedUrl, reader)
+			case debuginfopb.UploadInstructions_UPLOAD_STRATEGY_UNSPECIFIED:
+				err = errors.New("no upload strategy specified")
+			default:
+				err = fmt.Errorf("unknown upload strategy: %v", initiationResp.UploadInstructions.UploadStrategy)
+			}
+			if err != nil {
+				return fmt.Errorf("upload %q with Build ID %q: %w", flags.Upload.Path, buildID, err)
+			}
 
-				switch initiationResp.UploadInstructions.UploadStrategy {
-				case debuginfopb.UploadInstructions_UPLOAD_STRATEGY_GRPC:
-					if flags.LogLevel == LogLevelDebug {
-						fmt.Fprintf(os.Stdout, "Performing a gRPC upload for %q with Build ID %q.", upload.path, upload.buildID)
-					}
-					_, err = grpcUploadClient.Upload(ctx, initiationResp.UploadInstructions, upload.reader)
-				case debuginfopb.UploadInstructions_UPLOAD_STRATEGY_SIGNED_URL:
-					if flags.LogLevel == LogLevelDebug {
-						fmt.Fprintf(os.Stdout, "Performing a signed URL upload for %q with Build ID %q.", upload.path, upload.buildID)
-					}
-					err = uploadViaSignedURL(ctx, initiationResp.UploadInstructions.SignedUrl, upload.reader)
-				case debuginfopb.UploadInstructions_UPLOAD_STRATEGY_UNSPECIFIED:
-					err = errors.New("no upload strategy specified")
-				default:
-					err = fmt.Errorf("unknown upload strategy: %v", initiationResp.UploadInstructions.UploadStrategy)
-				}
-				if err != nil {
-					return fmt.Errorf("upload %q with Build ID %q: %w", upload.path, upload.buildID, err)
-				}
-
-				_, err = debuginfoClient.MarkUploadFinished(ctx, &debuginfopb.MarkUploadFinishedRequest{
-					BuildId:  upload.buildID,
-					UploadId: initiationResp.UploadInstructions.UploadId,
-					Type:     debuginfoTypeStringToPb(flags.Upload.Type),
-				})
-				if err != nil {
-					return fmt.Errorf("mark upload finished for %q with Build ID %q: %w", upload.path, upload.buildID, err)
-				}
+			_, err = debuginfoClient.MarkUploadFinished(ctx, &debuginfopb.MarkUploadFinishedRequest{
+				BuildId:  buildID,
+				UploadId: initiationResp.UploadInstructions.UploadId,
+				Type:     debuginfoTypeStringToPb(flags.Upload.Type),
+			})
+			if err != nil {
+				return fmt.Errorf("mark upload finished for %q with Build ID %q: %w", flags.Upload.Path, buildID, err)
 			}
 
 			return nil
@@ -295,7 +273,6 @@ func run(kongCtx *kong.Context, flags flags) error {
 			if err := os.MkdirAll(flags.Extract.OutputDir, 0o755); err != nil {
 				return fmt.Errorf("failed to create output dir, %s: %w", flags.Extract.OutputDir, err)
 			}
-			srcDst := map[string]io.WriteSeeker{}
 			for _, path := range flags.Extract.Paths {
 				ef, err := elf.Open(path)
 				if err != nil {
@@ -303,7 +280,7 @@ func run(kongCtx *kong.Context, flags flags) error {
 				}
 				defer ef.Close()
 
-				buildID, err := buildid.FromELF(ef)
+				buildID, err := GetBuildID(ef)
 				if err != nil {
 					return fmt.Errorf("get Build ID for %q: %w", path, err)
 				}
@@ -323,14 +300,12 @@ func run(kongCtx *kong.Context, flags flags) error {
 				}
 				defer outFile.Close()
 
-				srcDst[path] = outFile
+				if err := elfwriter.OnlyKeepDebug(outFile, f); err != nil {
+					return fmt.Errorf("failed to extract debug information: %w", err)
+				}
 			}
 
-			if len(srcDst) == 0 {
-				return errors.New("failed to find actionable files")
-			}
-
-			return extractAll(ctx, extractor, flags.Extract.Mode, srcDst)
+			return nil
 		}, func(error) {
 			cancel()
 		})
@@ -343,7 +318,7 @@ func run(kongCtx *kong.Context, flags flags) error {
 			}
 			defer ef.Close()
 
-			buildID, err := buildid.FromELF(ef)
+			buildID, err := GetBuildID(ef)
 			if err != nil {
 				return fmt.Errorf("get Build ID for %q: %w", flags.Buildid.Path, err)
 			}
@@ -462,34 +437,6 @@ func run(kongCtx *kong.Context, flags flags) error {
 	return g.Run()
 }
 
-// extractAll extracts debug information from the given executables.
-// It consumes a map of file sources to extract and a destination io.Writer.
-func extractAll(ctx context.Context, e *elfwriter.Extractor, mode string, srcDsts map[string]io.WriteSeeker) error {
-	var result error
-	for src, dst := range srcDsts {
-		f, err := os.Open(src)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "failed to open file: %s, %v", src, err)
-			result = errors.Join(result, err)
-			continue
-		}
-		defer f.Close()
-
-		var extractFn func(context.Context, io.WriteSeeker, io.ReaderAt) error
-		if mode == "strip-debug" {
-			extractFn = e.StripDebug
-		} else {
-			extractFn = e.OnlyKeepDebug
-		}
-
-		if err := extractFn(ctx, dst, f); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to extract debug information: %s, %v", src, err)
-			result = errors.Join(result, err)
-		}
-	}
-	return result
-}
-
 func grpcConn(reg prometheus.Registerer, flags flags) (*grpc.ClientConn, error) {
 	met := grpc_prometheus.NewClientMetrics()
 	met.EnableClientHandlingTimeHistogram()
@@ -574,4 +521,91 @@ func debuginfoTypeStringToPb(s string) debuginfopb.DebuginfoType {
 	default:
 		return debuginfopb.DebuginfoType_DEBUGINFO_TYPE_DEBUGINFO_UNSPECIFIED
 	}
+}
+
+var ErrNoBuildID = errors.New("no build ID")
+
+// GetBuildID extracts the build ID from the provided ELF file. This is read from
+// the .note.gnu.build-id or .notes section of the ELF, and may not exist. If no build ID is present
+// an ErrNoBuildID is returned.
+func GetBuildID(elfFile *elf.File) (string, error) {
+	sectionData, err := getSectionData(elfFile, ".note.gnu.build-id")
+	if err != nil {
+		sectionData, err = getSectionData(elfFile, ".notes")
+		if err != nil {
+			return "", ErrNoBuildID
+		}
+	}
+
+	return getBuildIDFromNotes(sectionData)
+}
+
+func getSectionData(elfFile *elf.File, sectionName string) ([]byte, error) {
+	section := elfFile.Section(sectionName)
+	if section == nil {
+		return nil, fmt.Errorf("failed to open the %s section", sectionName)
+	}
+	data, err := section.Data()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read data from section %s: %v", sectionName, err)
+	}
+	return data, nil
+}
+
+// getBuildIDFromNotes returns the build ID from an ELF notes section data.
+func getBuildIDFromNotes(notes []byte) (string, error) {
+	// 0x3 is the "Build ID" type. Not sure where this is standardized.
+	buildID, found, err := getNoteHexString(notes, "GNU", 0x3)
+	if err != nil {
+		return "", fmt.Errorf("could not determine BuildID: %v", err)
+	}
+	if !found {
+		return "", ErrNoBuildID
+	}
+	return buildID, nil
+}
+
+// getNoteHexString returns the hex string contents of an ELF note from a note section, as described
+// in the ELF standard in Figure 2-3.
+func getNoteHexString(sectionBytes []byte, name string, noteType uint32) (
+	noteHexString string, found bool, err error) {
+	// The data stored inside ELF notes is made of one or multiple structs, containing the
+	// following fields:
+	// 	- namesz	// 32-bit, size of "name"
+	// 	- descsz	// 32-bit, size of "desc"
+	// 	- type		// 32-bit - 0x3 in case of a BuildID, 0x100 in case of build salt
+	// 	- name		// namesz bytes, null terminated
+	// 	- desc		// descsz bytes, binary data: the actual contents of the note
+	// Because of this structure, the information of the build id starts at the 17th byte.
+
+	// Null terminated string
+	nameBytes := append([]byte(name), 0x0)
+	noteTypeBytes := make([]byte, 4)
+
+	binary.LittleEndian.PutUint32(noteTypeBytes, noteType)
+	noteHeader := append(noteTypeBytes, nameBytes...) //nolint:gocritic
+
+	// Try to find the note in the section
+	idx := bytes.Index(sectionBytes, noteHeader)
+	if idx == -1 {
+		return "", false, nil
+	}
+	if idx < 4 { // there needs to be room for descsz
+		return "", false, errors.New("could not read note data size")
+	}
+
+	idxDataStart := idx + len(noteHeader)
+	idxDataStart += (4 - (idxDataStart & 3)) & 3 // data is 32bit-aligned, round up
+
+	// read descsz and compute the last index of the note data
+	dataSize := binary.LittleEndian.Uint32(sectionBytes[idx-4 : idx])
+	idxDataEnd := uint64(idxDataStart) + uint64(dataSize)
+
+	// Check sanity (64 is totally arbitrary, as we only use it for Linux ID and Build ID)
+	if idxDataEnd > uint64(len(sectionBytes)) || dataSize > 64 {
+		return "", false, fmt.Errorf(
+			"non-sensical note: %d start index: %d, %v end index %d, size %d, section size %d",
+			idx, idxDataStart, noteHeader, idxDataEnd, dataSize, len(sectionBytes))
+	}
+	return hex.EncodeToString(sectionBytes[idxDataStart:idxDataEnd]), true, nil
 }
