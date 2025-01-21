@@ -70,8 +70,7 @@ type flags struct {
 	Extract struct {
 		OutputDir string `kong:"help='Output directory path to use for extracted debug information files.',default='out'"`
 
-		Paths                 []string `kong:"required,arg,name='path',help='Paths to extract debug information.',type:'path'"`
-		CompressDWARFSections bool     `kong:"default=false,help:'Compress debuginfo files DWARF sections before uploading.'"`
+		Paths []string `kong:"required,arg,name='path',help='Paths to extract debug information.',type:'path'"`
 	} `cmd:"" help:"Extract debug information."`
 
 	Buildid struct {
@@ -93,19 +92,7 @@ func main() {
 	}
 }
 
-type uploadInfo struct {
-	buildID string
-	path    string
-	reader  io.ReadSeeker
-	size    int64
-}
-
 func run(kongCtx *kong.Context, flags flags) error {
-	opts := []elfwriter.Option{}
-	if flags.Extract.CompressDWARFSections {
-		opts = append(opts, elfwriter.WithCompressDWARFSections())
-	}
-
 	var g grun.Group
 	ctx, cancel := context.WithCancel(context.Background())
 	switch kongCtx.Command() {
@@ -197,13 +184,13 @@ func run(kongCtx *kong.Context, flags flags) error {
 			if err != nil {
 				return fmt.Errorf("check if upload should be initiated for %q with Build ID %q: %w", flags.Upload.Path, buildID, err)
 			}
-			if !shouldInitiate.ShouldInitiateUpload {
-				fmt.Fprintf(os.Stdout, "Skipping upload of %q with Build ID %q as the store instructed not to: %s\n", flags.Upload.Path, buildID, shouldInitiate.Reason)
+			if !shouldInitiate.GetShouldInitiateUpload() {
+				fmt.Fprintf(os.Stdout, "Skipping upload of %q with Build ID %q as the store instructed not to: %s\n", flags.Upload.Path, buildID, shouldInitiate.GetReason())
 				return nil
 			}
 
 			if flags.Upload.NoInitiate {
-				fmt.Fprintf(os.Stdout, "Not initiating upload of %q with Build ID %q as requested, but would have requested that next, because: %s\n", flags.Upload.Path, buildID, shouldInitiate.Reason)
+				fmt.Fprintf(os.Stdout, "Not initiating upload of %q with Build ID %q as requested, but would have requested that next, because: %s\n", flags.Upload.Path, buildID, shouldInitiate.GetReason())
 				return nil
 			}
 
@@ -228,24 +215,24 @@ func run(kongCtx *kong.Context, flags flags) error {
 			}
 
 			if flags.LogLevel == LogLevelDebug {
-				fmt.Fprintf(os.Stdout, "Upload instructions\nBuildID: %s\nUploadID: %s\nUploadStrategy: %s\nSignedURL: %s\nType: %s\n", initiationResp.UploadInstructions.BuildId, initiationResp.UploadInstructions.UploadId, initiationResp.UploadInstructions.UploadStrategy.String(), initiationResp.UploadInstructions.SignedUrl, initiationResp.UploadInstructions.Type)
+				fmt.Fprintf(os.Stdout, "Upload instructions\nBuildID: %s\nUploadID: %s\nUploadStrategy: %s\nSignedURL: %s\nType: %s\n", initiationResp.GetUploadInstructions().GetBuildId(), initiationResp.GetUploadInstructions().GetUploadId(), initiationResp.GetUploadInstructions().GetUploadStrategy().String(), initiationResp.GetUploadInstructions().GetSignedUrl(), initiationResp.GetUploadInstructions().GetType())
 			}
 
-			switch initiationResp.UploadInstructions.UploadStrategy {
+			switch initiationResp.GetUploadInstructions().GetUploadStrategy() {
 			case debuginfopb.UploadInstructions_UPLOAD_STRATEGY_GRPC:
 				if flags.LogLevel == LogLevelDebug {
 					fmt.Fprintf(os.Stdout, "Performing a gRPC upload for %q with Build ID %q.", flags.Upload.Path, buildID)
 				}
-				_, err = grpcUploadClient.Upload(ctx, initiationResp.UploadInstructions, reader)
+				_, err = grpcUploadClient.Upload(ctx, initiationResp.GetUploadInstructions(), reader)
 			case debuginfopb.UploadInstructions_UPLOAD_STRATEGY_SIGNED_URL:
 				if flags.LogLevel == LogLevelDebug {
 					fmt.Fprintf(os.Stdout, "Performing a signed URL upload for %q with Build ID %q.", flags.Upload.Path, buildID)
 				}
-				err = uploadViaSignedURL(ctx, initiationResp.UploadInstructions.SignedUrl, reader)
+				err = uploadViaSignedURL(ctx, initiationResp.GetUploadInstructions().GetSignedUrl(), reader)
 			case debuginfopb.UploadInstructions_UPLOAD_STRATEGY_UNSPECIFIED:
 				err = errors.New("no upload strategy specified")
 			default:
-				err = fmt.Errorf("unknown upload strategy: %v", initiationResp.UploadInstructions.UploadStrategy)
+				err = fmt.Errorf("unknown upload strategy: %v", initiationResp.GetUploadInstructions().GetUploadStrategy())
 			}
 			if err != nil {
 				return fmt.Errorf("upload %q with Build ID %q: %w", flags.Upload.Path, buildID, err)
@@ -253,7 +240,7 @@ func run(kongCtx *kong.Context, flags flags) error {
 
 			_, err = debuginfoClient.MarkUploadFinished(ctx, &debuginfopb.MarkUploadFinishedRequest{
 				BuildId:  buildID,
-				UploadId: initiationResp.UploadInstructions.UploadId,
+				UploadId: initiationResp.GetUploadInstructions().GetUploadId(),
 				Type:     debuginfoTypeStringToPb(flags.Upload.Type),
 			})
 			if err != nil {
@@ -270,7 +257,7 @@ func run(kongCtx *kong.Context, flags flags) error {
 			if err := os.RemoveAll(flags.Extract.OutputDir); err != nil {
 				return fmt.Errorf("failed to clean output dir, %s: %w", flags.Extract.OutputDir, err)
 			}
-			if err := os.MkdirAll(flags.Extract.OutputDir, 0o755); err != nil {
+			if err := os.MkdirAll(flags.Extract.OutputDir, 0o755); err != nil { //nolint:mnd
 				return fmt.Errorf("failed to create output dir, %s: %w", flags.Extract.OutputDir, err)
 			}
 			for _, path := range flags.Extract.Paths {
@@ -475,7 +462,7 @@ func grpcConn(reg prometheus.Registerer, flags flags) (*grpc.ClientConn, error) 
 		}))
 	}
 
-	return grpc.Dial(flags.Upload.StoreAddress, opts...)
+	return grpc.NewClient(flags.Upload.StoreAddress, opts...)
 }
 
 type perRequestBearerToken struct {
@@ -547,7 +534,7 @@ func getSectionData(elfFile *elf.File, sectionName string) ([]byte, error) {
 	}
 	data, err := section.Data()
 	if err != nil {
-		return nil, fmt.Errorf("failed to read data from section %s: %v", sectionName, err)
+		return nil, fmt.Errorf("failed to read data from section %s: %w", sectionName, err)
 	}
 	return data, nil
 }
@@ -555,9 +542,9 @@ func getSectionData(elfFile *elf.File, sectionName string) ([]byte, error) {
 // getBuildIDFromNotes returns the build ID from an ELF notes section data.
 func getBuildIDFromNotes(notes []byte) (string, error) {
 	// 0x3 is the "Build ID" type. Not sure where this is standardized.
-	buildID, found, err := getNoteHexString(notes, "GNU", 0x3)
+	buildID, found, err := getNoteHexString(notes, "GNU", 0x3) //nolint:mnd
 	if err != nil {
-		return "", fmt.Errorf("could not determine BuildID: %v", err)
+		return "", fmt.Errorf("could not determine BuildID: %w", err)
 	}
 	if !found {
 		return "", ErrNoBuildID
@@ -567,8 +554,7 @@ func getBuildIDFromNotes(notes []byte) (string, error) {
 
 // getNoteHexString returns the hex string contents of an ELF note from a note section, as described
 // in the ELF standard in Figure 2-3.
-func getNoteHexString(sectionBytes []byte, name string, noteType uint32) (
-	noteHexString string, found bool, err error) {
+func getNoteHexString(sectionBytes []byte, name string, noteType uint32) (string, bool, error) {
 	// The data stored inside ELF notes is made of one or multiple structs, containing the
 	// following fields:
 	// 	- namesz	// 32-bit, size of "name"
@@ -579,27 +565,29 @@ func getNoteHexString(sectionBytes []byte, name string, noteType uint32) (
 	// Because of this structure, the information of the build id starts at the 17th byte.
 
 	// Null terminated string
-	nameBytes := append([]byte(name), 0x0)
-	noteTypeBytes := make([]byte, 4)
+	nameBytes := append([]byte(name), 0x0) //nolint:mnd
+	noteTypeBytes := make([]byte, 4)       //nolint:mnd
 
 	binary.LittleEndian.PutUint32(noteTypeBytes, noteType)
-	noteHeader := append(noteTypeBytes, nameBytes...) //nolint:gocritic
+	noteHeader := append(noteTypeBytes, nameBytes...) //nolint:gocritic,makezero
 
 	// Try to find the note in the section
 	idx := bytes.Index(sectionBytes, noteHeader)
 	if idx == -1 {
 		return "", false, nil
 	}
-	if idx < 4 { // there needs to be room for descsz
+	// there needs to be room for descsz
+	if idx < 4 { //nolint:mnd
 		return "", false, errors.New("could not read note data size")
 	}
 
 	idxDataStart := idx + len(noteHeader)
-	idxDataStart += (4 - (idxDataStart & 3)) & 3 // data is 32bit-aligned, round up
+	// data is 32bit-aligned, round up
+	idxDataStart += (4 - (idxDataStart & 3)) & 3 //nolint:mnd
 
 	// read descsz and compute the last index of the note data
 	dataSize := binary.LittleEndian.Uint32(sectionBytes[idx-4 : idx])
-	idxDataEnd := uint64(idxDataStart) + uint64(dataSize)
+	idxDataEnd := uint64(idxDataStart) + uint64(dataSize) //nolint:gosec
 
 	// Check sanity (64 is totally arbitrary, as we only use it for Linux ID and Build ID)
 	if idxDataEnd > uint64(len(sectionBytes)) || dataSize > 64 {
